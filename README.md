@@ -1,6 +1,8 @@
-# DIRT 5 DLSS v1.1
+# DIRT 5 DLSS v1.3
 
 A ReShade add-on for replacing the game's TAA with NVIDIA DLSS/DLAA, based on RenoDX.
+
+An option for enabling a port of the motion blur shader from Driveclub during gameplay is also available.
 
 An NVIDIA GeForce RTX GPU is required.
 
@@ -27,6 +29,12 @@ An NVIDIA GeForce RTX GPU is required.
 For a first run on a 1080p monitor, set **Render, History, and Final** to **1920 × 1080** and turn off **Dynamic Resolution**. To try upscaling, set **Render** to **1920 × 1080** and **History** and **Final** to **2560 × 1440** if the game offers those options
 
 Check `ReShade.log` beside the game executable. The `NGX DLAA initialized` or `NGX DLSS initialized` line reports the sizes and preset hint. Recurring `DLAA submitted` or `DLSS submitted` lines confirm that the feature is running. Unsupported ratios and unrecognized frame layouts fall back to stock TAA. If NGX fails to initialize, check the NVIDIA DLL filename and location from step 3.
+
+## Gameplay motion blur
+
+In the **DIRT 5 DLSS** tab, choose **DriveClub 30 FPS exposure** or **Short 60 FPS exposure** under **Gameplay motion blur**. The setting applies live in automatic DLAA / DLSS mode and defaults to **Off**. The motion-vector debug view takes priority when enabled.
+
+This implementation is based on the one found in the [Driveclub Recomp](https://github.com/OverkillLabs3/driveclub-recomp/pull/216/files).
 
 ## Inspect motion vectors
 
