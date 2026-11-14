@@ -149,7 +149,7 @@ public:
 
     bool Run(ID3D12CommandQueue* queue, ExecuteLists execute, const std::shared_ptr<Frame>& frame,
              Rect render, Rect history, float jitter_x, float jitter_y, bool reset, UINT sharpening,
-             NVSDK_NGX_DLSS_Hint_Render_Preset preset) {
+             NVSDK_NGX_DLSS_Hint_Render_Preset preset, UINT motion_view_range = 0) {
         if (disabled_ || !fence_) return false;
         Prune();
         if (!ngx_initialized_ && !Initialize()) {
@@ -242,8 +242,9 @@ public:
         list->SetComputeRootSignature(pack_root_.Get());
         list->SetPipelineState(pack_.Get());
         list->SetComputeRootDescriptorTable(0, Gpu(slot, 6));
-        const UINT pack_settings[]{sharpening, history.x, history.y, history.size.width, history.size.height};
-        list->SetComputeRoot32BitConstants(1, 5, pack_settings, 0);
+        const UINT pack_settings[]{sharpening, history.x, history.y, history.size.width, history.size.height,
+                                   motion_view_range, render.size.width, render.size.height};
+        list->SetComputeRoot32BitConstants(1, static_cast<UINT>(std::size(pack_settings)), pack_settings, 0);
         Dispatch(list, history.size);
         D3D12_RESOURCE_BARRIER done[]{
             Transition(slot.output.Get(), read, write),
@@ -289,10 +290,10 @@ private:
 
     bool Pipeline(bool prepare, const void* code, size_t size, ID3D12RootSignature** signature,
                   ID3D12PipelineState** pipeline) {
-        const UINT descriptors = prepare ? 3 : 1;
+        const UINT srvs = prepare ? 3 : 2;
         const D3D12_DESCRIPTOR_RANGE ranges[]{
-            {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, descriptors, 0, 0, 0},
-            {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, descriptors, 0, 0, descriptors},
+            {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, srvs, 0, 0, 0},
+            {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, prepare ? 3u : 1u, 0, 0, srvs},
         };
         D3D12_ROOT_PARAMETER root[4]{};
         const UINT table = prepare ? 2 : 0;
@@ -304,7 +305,7 @@ private:
             root[3].Constants = {2, 0, 4};
         } else {
             root[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-            root[1].Constants.Num32BitValues = 5;
+            root[1].Constants.Num32BitValues = 8;
         }
         root[table].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         root[table].DescriptorTable = {2, ranges};
@@ -346,7 +347,7 @@ private:
             return false;
         }
         increment_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        const D3D12_DESCRIPTOR_HEAP_DESC heap{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 8,
+        const D3D12_DESCRIPTOR_HEAP_DESC heap{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 9,
                                             D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
         for (auto& slot : slots_) {
             if (FAILED(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.allocator))) ||
@@ -479,7 +480,8 @@ private:
         uav(4, slot.depth.Get(), DXGI_FORMAT_R32_FLOAT);
         uav(5, slot.color.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
         srv(6, slot.output.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-        uav(7, frame.history.Get(), DXGI_FORMAT_R11G11B10_FLOAT);
+        srv(7, slot.motion.Get(), DXGI_FORMAT_R16G16_FLOAT);
+        uav(8, frame.history.Get(), DXGI_FORMAT_R11G11B10_FLOAT);
     }
 };
 }  // namespace dirt5

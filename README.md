@@ -1,11 +1,11 @@
-# DIRT 5 DLSS v1.0
+# DIRT 5 DLSS v1.1
 
 A ReShade add-on that adds NVIDIA DLSS Super Resolution and DLAA to the Windows DirectX 12 version of DIRT 5. It requires an NVIDIA GeForce RTX GPU.
 
 ## Install
 
 1. Close DIRT 5. Install ReShade 6.8.0 with **full add-on support** for `DIRT5.exe`. In the installer, select **DirectX 10/11/12**. [ReShade downloads](https://reshade.me/)
-2. Place the v1.0 `Dirt5DLSS.addon64` beside `DIRT5.exe`. If you downloaded the source archive, build the add-on using the instructions below. If you are upgrading from an older build named `Dirt5DLAA.addon64`, remove that copy from the game folder.
+2. Place the v1.1 `Dirt5DLSS.addon64` beside `DIRT5.exe`. If you downloaded the source archive, build the add-on using the instructions below. If you are upgrading from an older build named `Dirt5DLAA.addon64`, remove that copy from the game folder.
 3. **Download NVIDIA’s `nvngx_dlss.dll` separately and manually copy it into the DIRT 5 game folder beside `DIRT5.exe` and `Dirt5DLSS.addon64`.** The release packages omit NVIDIA’s DLL. The tested version is **310.9.16**, from `lib/Windows_x86_64/rel/` in NVIDIA’s SDK. Use **Download raw file** on the linked page to get the Windows x64 release DLL. [NVIDIA DLSS runtime 310.9.16](https://github.com/NVIDIA/DLSS/blob/v310.9.16/lib/Windows_x86_64/rel/nvngx_dlss.dll)
 4. Launch the game, press **Home** to open ReShade, and select **DIRT 5 DLSS**. Depending on your ReShade layout, it may first appear as a floating panel that you can dock to the tab bar. ReShade saves your choices automatically.
 
@@ -34,6 +34,10 @@ nvngx_dlss.dll
 For a first run, set **Render, History, and Final** to **1920 × 1080** and turn off **Dynamic Resolution**. To try upscaling, set **Render** to **1920 × 1080** and **History** and **Final** to **2560 × 1440** if the game offers those options. The 1080p native path was verified in-game. Unequal resolutions were exercised in standalone RTX 2070 tests, and continuous Dynamic Resolution still needs in-game validation.
 
 Check `ReShade.log` beside the game executable. The `NGX DLAA initialized` or `NGX DLSS initialized` line reports the sizes and preset hint. Recurring `DLAA submitted` or `DLSS submitted` lines confirm that the feature is running. Unsupported ratios and unrecognized frame layouts fall back to stock TAA. If NGX fails to initialize, check the NVIDIA DLL filename and location from step 3.
+
+## Inspect motion vectors
+
+In the **DIRT 5 DLSS** tab, enable **Show DLSS motion vectors** while automatic DLAA / DLSS is active. The view shows the current-to-previous displacement supplied to NGX in render pixels. Gray means zero. Brighter red and green mean right and down, respectively, while darker red and green mean left and up. Blue increases with magnitude. Reduce **Motion range** to see small movements or increase it when the colors saturate. The view passes through the game's compositor and turns off on restart.
 
 ## Build from source
 

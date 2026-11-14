@@ -1,4 +1,5 @@
 Texture2D<float4> DlssOutput : register(t0);
+Texture2D<float2> MotionPixels : register(t1);
 RWTexture2D<float3> HistoryColor : register(u0);
 cbuffer PackSettings : register(b0) {
     uint SharpeningPercent;
@@ -6,6 +7,9 @@ cbuffer PackSettings : register(b0) {
     uint HistoryY;
     uint HistoryWidth;
     uint HistoryHeight;
+    uint MotionRange;
+    uint RenderWidth;
+    uint RenderHeight;
 };
 
 float3 ReadColor(int2 pixel, int2 historySize, uint2 sourceSize) {
@@ -33,6 +37,18 @@ void main(uint3 thread : SV_DispatchThreadID) {
     if (any(thread.xy >= uint2(historySize))) return;
 
     const int2 pixel = int2(thread.xy);
+    const int2 target = pixel + int2(HistoryX, HistoryY);
+    [branch]
+    if (MotionRange != 0) {
+        const uint2 renderSize = uint2(RenderWidth, RenderHeight);
+        // Sample the active render rectangle. NGX can allocate a larger input texture.
+        const uint2 source = min(uint2((float2(pixel) + 0.5) * (float2(renderSize) / historySize)),
+                                 renderSize - 1);
+        const float2 motion = MotionPixels.Load(int3(source, 0)) / MotionRange;
+        HistoryColor[target] = float3(0.18 + 0.16 * clamp(motion, -1.0, 1.0),
+                                      0.18 + 0.32 * saturate(length(motion)));
+        return;
+    }
     uint width, height;
     DlssOutput.GetDimensions(width, height);
     const uint2 sourceSize = uint2(width, height);
@@ -53,5 +69,5 @@ void main(uint3 thread : SV_DispatchThreadID) {
         // Bound the sharpened value to the local HDR color range to limit halos.
         color = clamp(color + (SharpeningPercent * 0.01) * detail, low, high);
     }
-    HistoryColor[pixel + int2(HistoryX, HistoryY)] = clamp(color, 0.0, 65000.0);
+    HistoryColor[target] = clamp(color, 0.0, 65000.0);
 }

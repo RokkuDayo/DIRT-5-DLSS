@@ -135,6 +135,7 @@ bool pass_through = false;
 bool trace_jitter = false;
 bool enable_dlaa = false;
 std::atomic_int sharpening{0};
+std::atomic_uint motion_view_range{0};
 
 constexpr char kSettingsSection[] = "DIRT5_DLAA";
 constexpr char kSettingsTab[] = "DIRT 5 DLSS";
@@ -192,7 +193,7 @@ void LoadSettings(const std::wstring& directory) {
 
 void DrawSettings(effect_runtime*) {
     constexpr const char* modes[]{"Stock TAA", "DLAA / DLSS (automatic)", "Unfiltered RGB (diagnostic)"};
-    ImGui::TextUnformatted("DIRT 5 DLSS v1.0");
+    ImGui::TextUnformatted("DIRT 5 DLSS v1.1");
     if (ImGui::Combo("Anti-aliasing", &pending_settings.mode, modes, static_cast<int>(std::size(modes)))) {
         reshade::set_config_value(nullptr, kSettingsSection, "Mode", pending_settings.mode);
     }
@@ -213,6 +214,20 @@ void DrawSettings(effect_runtime*) {
         reshade::set_config_value(nullptr, kSettingsSection, "Sharpening", strength);
     }
     ImGui::SetItemTooltip("Applies immediately to DLAA and DLSS. 0%% disables sharpening.");
+
+    static int motion_range = 16;
+    bool show_motion = motion_view_range.load(std::memory_order_relaxed) != 0;
+    if (ImGui::Checkbox("Show DLSS motion vectors", &show_motion)) {
+        motion_view_range.store(show_motion ? static_cast<unsigned>(motion_range) : 0, std::memory_order_relaxed);
+    }
+    ImGui::SetItemTooltip("Replaces the scene with the vectors supplied to NGX while automatic DLAA / DLSS is active.");
+    if (show_motion) {
+        if (ImGui::SliderInt("Motion range", &motion_range, 1, 128, "%d px", ImGuiSliderFlags_AlwaysClamp)) {
+            motion_view_range.store(static_cast<unsigned>(motion_range), std::memory_order_relaxed);
+        }
+        ImGui::TextWrapped("Neutral gray = zero. Red tracks horizontal motion and green tracks vertical motion. "
+            "Brighter means right or down, darker means left or up. Blue increases with speed.");
+    }
 
     if (ImGui::Checkbox("Trace jitter (diagnostic)", &pending_settings.trace_jitter)) {
         reshade::set_config_value(nullptr, kSettingsSection, "TraceJitter", pending_settings.trace_jitter);
@@ -611,7 +626,8 @@ void STDMETHODCALLTYPE ExecuteHook(ID3D12CommandQueue* queue, UINT count, ID3D12
             if (trace.renderer->Run(queue, original_execute, ready.frame, ready.render, ready.history,
                                     ready.jitter_x, ready.jitter_y, reset,
                                     static_cast<UINT>(sharpening.load(std::memory_order_relaxed)),
-                                    dirt5::kPresets[ready.preset])) {
+                                    dirt5::kPresets[ready.preset],
+                                    motion_view_range.load(std::memory_order_relaxed))) {
                 ++trace.evaluated;
                 if (reset) ++trace.resets;
                 if (recovered_depth && ++trace.depth_recoveries <= 4) {
@@ -1212,6 +1228,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshade_m
         }
     }
     LoadSettings(dirt5::addon_directory);
+    motion_view_range.store(0, std::memory_order_relaxed);
     if (enable_dlaa) {
         const auto status = MH_Initialize();
         if (status != MH_OK) {
@@ -1222,9 +1239,9 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshade_m
     Events<true>();
     reshade::register_overlay(kSettingsTab, DrawSettings);
     reshade::log::message(reshade::log::level::info,
-        enable_dlaa ? "[Dirt5DLAA] Initialized v1.0 (automatic DLAA / DLSS)." :
-        pass_through ? "[Dirt5DLAA] Initialized v1.0 (experimental color pass-through)." :
-                       "[Dirt5DLAA] Initialized v1.0 (stock TAA).");
+        enable_dlaa ? "[Dirt5DLAA] Initialized v1.1 (automatic DLAA / DLSS)." :
+        pass_through ? "[Dirt5DLAA] Initialized v1.1 (experimental color pass-through)." :
+                       "[Dirt5DLAA] Initialized v1.1 (stock TAA).");
     if (enable_dlaa) {
         char line[96];
         std::snprintf(line, sizeof(line), "[Dirt5DLAA] Sharpening=%d (0-100).", sharpening.load(std::memory_order_relaxed));
