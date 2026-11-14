@@ -1,10 +1,12 @@
 # DIRT 5 DLSS v1.1
 
-A ReShade add-on for replacing the game's TAA with NVIDIA DLSS/DLAA, based on RenoDX. An NVIDIA GeForce RTX GPU is required.
+A ReShade add-on for replacing the game's TAA with NVIDIA DLSS/DLAA, based on RenoDX.
+
+An NVIDIA GeForce RTX GPU is required.
 
 ## Install
 
-1. Close DIRT 5. Install ReShade 6.8.0 with **full add-on support** for `DIRT5.exe`. In the installer, select **DirectX 10/11/12**. [ReShade downloads](https://reshade.me/)
+1. Install ReShade 6.8.0 with **full add-on support** for `DIRT5.exe`. In the installer, select **DirectX 10/11/12**. [ReShade downloads](https://reshade.me/)
 2. Place the v1.1 `Dirt5DLSS.addon64` beside `DIRT5.exe`. You can find it in the Releases page.
 3. **Download NVIDIA’s `nvngx_dlss.dll` separately and manually copy it into the DIRT 5 game folder beside `DIRT5.exe` and `Dirt5DLSS.addon64`.** The tested version is **310.9.16**, from `lib/Windows_x86_64/rel/` in NVIDIA’s SDK. Use **Download raw file** on the linked page to get the Windows x64 release DLL. [NVIDIA DLSS runtime 310.9.16](https://github.com/NVIDIA/DLSS/blob/v310.9.16/lib/Windows_x86_64/rel/nvngx_dlss.dll)
 4. Launch the game, press **Home** to open ReShade, and select **DIRT 5 DLSS** to confirm it is fully functional. Depending on your ReShade layout, it may first appear as a floating panel that you can dock to the tab bar. ReShade saves your choices automatically.
