@@ -41,3 +41,6 @@ Use an x64 Visual Studio Developer PowerShell with MSVC and DXC. The build uses 
 The script writes `Dirt5DLSS.addon64` to the source folder. Install it using the steps above, including the separate NVIDIA DLL.
 
 Third-party notices are in [licenses/](licenses/).
+
+# AI Usage Disclosure
+Codex was used in this project to create the addon.
