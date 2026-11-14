@@ -4,6 +4,7 @@
 #include <nvsdk_ngx_helpers.h>
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <deque>
@@ -149,7 +150,7 @@ public:
 
     bool Run(ID3D12CommandQueue* queue, ExecuteLists execute, const std::shared_ptr<Frame>& frame,
              Rect render, Rect history, float jitter_x, float jitter_y, bool reset, UINT sharpening,
-             NVSDK_NGX_DLSS_Hint_Render_Preset preset, UINT motion_view_range = 0) {
+             NVSDK_NGX_DLSS_Hint_Render_Preset preset, UINT motion_view_range = 0, float blur_scale = 0.0f) {
         if (disabled_ || !fence_) return false;
         Prune();
         if (!ngx_initialized_ && !Initialize()) {
@@ -243,7 +244,8 @@ public:
         list->SetPipelineState(pack_.Get());
         list->SetComputeRootDescriptorTable(0, Gpu(slot, 6));
         const UINT pack_settings[]{sharpening, history.x, history.y, history.size.width, history.size.height,
-                                   motion_view_range, render.size.width, render.size.height};
+                                   motion_view_range, render.size.width, render.size.height,
+                                   std::bit_cast<UINT>(reset ? 0.0f : blur_scale)};
         list->SetComputeRoot32BitConstants(1, static_cast<UINT>(std::size(pack_settings)), pack_settings, 0);
         Dispatch(list, history.size);
         D3D12_RESOURCE_BARRIER done[]{
@@ -290,7 +292,7 @@ private:
 
     bool Pipeline(bool prepare, const void* code, size_t size, ID3D12RootSignature** signature,
                   ID3D12PipelineState** pipeline) {
-        const UINT srvs = prepare ? 3 : 2;
+        constexpr UINT srvs = 3;
         const D3D12_DESCRIPTOR_RANGE ranges[]{
             {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, srvs, 0, 0, 0},
             {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, prepare ? 3u : 1u, 0, 0, srvs},
@@ -305,11 +307,18 @@ private:
             root[3].Constants = {2, 0, 4};
         } else {
             root[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-            root[1].Constants.Num32BitValues = 8;
+            root[1].Constants.Num32BitValues = 9;
         }
         root[table].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         root[table].DescriptorTable = {2, ranges};
-        const D3D12_ROOT_SIGNATURE_DESC desc{prepare ? 4u : 2u, root, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+        D3D12_STATIC_SAMPLER_DESC sampler{};
+        sampler.Filter = D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+        sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.MaxAnisotropy = 1;
+        sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        sampler.MaxLOD = D3D12_FLOAT32_MAX;
+        const D3D12_ROOT_SIGNATURE_DESC desc{prepare ? 4u : 2u, root, prepare ? 0u : 1u,
+                                             prepare ? nullptr : &sampler, D3D12_ROOT_SIGNATURE_FLAG_NONE};
         ComPtr<ID3DBlob> blob;
         if (FAILED(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, nullptr)) ||
             FAILED(device_->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(signature)))) {
@@ -347,7 +356,7 @@ private:
             return false;
         }
         increment_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        const D3D12_DESCRIPTOR_HEAP_DESC heap{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 9,
+        const D3D12_DESCRIPTOR_HEAP_DESC heap{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 10,
                                             D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
         for (auto& slot : slots_) {
             if (FAILED(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.allocator))) ||
@@ -481,7 +490,8 @@ private:
         uav(5, slot.color.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
         srv(6, slot.output.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
         srv(7, slot.motion.Get(), DXGI_FORMAT_R16G16_FLOAT);
-        uav(8, frame.history.Get(), DXGI_FORMAT_R11G11B10_FLOAT);
+        srv(8, slot.depth.Get(), DXGI_FORMAT_R32_FLOAT);
+        uav(9, frame.history.Get(), DXGI_FORMAT_R11G11B10_FLOAT);
     }
 };
 }  // namespace dirt5

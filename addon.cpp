@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -92,6 +93,7 @@ struct QueueTrace {
     ReadyFrame ready, last;
     unsigned evaluated = 0, fallbacks = 0, resets = 0, depth_recoveries = 0;
     bool reset = true;
+    std::chrono::steady_clock::time_point last_evaluation{};
 };
 struct __declspec(uuid("0BBF4C4A-891B-4F45-98CC-0F78BC13C5CB")) DeviceData {
     std::recursive_mutex mutex;
@@ -136,6 +138,7 @@ bool trace_jitter = false;
 bool enable_dlaa = false;
 std::atomic_int sharpening{0};
 std::atomic_uint motion_view_range{0};
+std::atomic_int motion_blur{0};
 
 constexpr char kSettingsSection[] = "DIRT5_DLAA";
 constexpr char kSettingsTab[] = "DIRT 5 DLSS";
@@ -193,7 +196,7 @@ void LoadSettings(const std::wstring& directory) {
 
 void DrawSettings(effect_runtime*) {
     constexpr const char* modes[]{"Stock TAA", "DLAA / DLSS (automatic)", "Unfiltered RGB (diagnostic)"};
-    ImGui::TextUnformatted("DIRT 5 DLSS v1.1");
+    ImGui::TextUnformatted("DIRT 5 DLSS v1.3");
     if (ImGui::Combo("Anti-aliasing", &pending_settings.mode, modes, static_cast<int>(std::size(modes)))) {
         reshade::set_config_value(nullptr, kSettingsSection, "Mode", pending_settings.mode);
     }
@@ -214,6 +217,14 @@ void DrawSettings(effect_runtime*) {
         reshade::set_config_value(nullptr, kSettingsSection, "Sharpening", strength);
     }
     ImGui::SetItemTooltip("Applies immediately to DLAA and DLSS. 0%% disables sharpening.");
+
+    constexpr const char* exposures[]{"Off", "DriveClub 30 FPS exposure", "Short 60 FPS exposure"};
+    int blur = motion_blur.load(std::memory_order_relaxed);
+    if (ImGui::Combo("Gameplay motion blur", &blur, exposures, static_cast<int>(std::size(exposures)))) {
+        motion_blur.store(blur, std::memory_order_relaxed);
+        reshade::set_config_value(nullptr, kSettingsSection, "MotionBlur", blur);
+    }
+    ImGui::SetItemTooltip("Experimental depth-aware blur. Applies live in automatic DLAA / DLSS mode.");
 
     static int motion_range = 16;
     bool show_motion = motion_view_range.load(std::memory_order_relaxed) != 0;
@@ -623,11 +634,20 @@ void STDMETHODCALLTYPE ExecuteHook(ID3D12CommandQueue* queue, UINT count, ID3D12
             ready.preset = preset_index.load(std::memory_order_relaxed);
             const bool reset = trace.reset || trace.last.render != ready.render || trace.last.history != ready.history ||
                 trace.last.preset != ready.preset || CameraCut(trace.last, ready);
+            const auto now = std::chrono::steady_clock::now();
+            const float frame_seconds = std::chrono::duration<float>(now - trace.last_evaluation).count();
+            const int exposure = motion_blur.load(std::memory_order_relaxed);
+            float blur_scale = 0.0f;
+            if (!reset && exposure && frame_seconds > 0.0f && frame_seconds <= 0.1f) {
+                const float reference_fps = exposure == 1 ? 30.0f : 60.0f;
+                blur_scale = 0.2f / (reference_fps * std::max(frame_seconds, 1.0f / 240.0f));
+            }
             if (trace.renderer->Run(queue, original_execute, ready.frame, ready.render, ready.history,
                                     ready.jitter_x, ready.jitter_y, reset,
                                     static_cast<UINT>(sharpening.load(std::memory_order_relaxed)),
                                     dirt5::kPresets[ready.preset],
-                                    motion_view_range.load(std::memory_order_relaxed))) {
+                                    motion_view_range.load(std::memory_order_relaxed), blur_scale)) {
+                trace.last_evaluation = now;
                 ++trace.evaluated;
                 if (reset) ++trace.resets;
                 if (recovered_depth && ++trace.depth_recoveries <= 4) {
@@ -1229,6 +1249,9 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshade_m
     }
     LoadSettings(dirt5::addon_directory);
     motion_view_range.store(0, std::memory_order_relaxed);
+    int exposure = 0;
+    reshade::get_config_value(nullptr, kSettingsSection, "MotionBlur", exposure);
+    motion_blur.store(exposure >= 0 && exposure <= 2 ? exposure : 0, std::memory_order_relaxed);
     if (enable_dlaa) {
         const auto status = MH_Initialize();
         if (status != MH_OK) {
@@ -1239,9 +1262,9 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshade_m
     Events<true>();
     reshade::register_overlay(kSettingsTab, DrawSettings);
     reshade::log::message(reshade::log::level::info,
-        enable_dlaa ? "[Dirt5DLAA] Initialized v1.1 (automatic DLAA / DLSS)." :
-        pass_through ? "[Dirt5DLAA] Initialized v1.1 (experimental color pass-through)." :
-                       "[Dirt5DLAA] Initialized v1.1 (stock TAA).");
+        enable_dlaa ? "[Dirt5DLAA] Initialized v1.3 (automatic DLAA / DLSS)." :
+        pass_through ? "[Dirt5DLAA] Initialized v1.3 (experimental color pass-through)." :
+                       "[Dirt5DLAA] Initialized v1.3 (stock TAA).");
     if (enable_dlaa) {
         char line[96];
         std::snprintf(line, sizeof(line), "[Dirt5DLAA] Sharpening=%d (0-100).", sharpening.load(std::memory_order_relaxed));
