@@ -34,7 +34,8 @@ float3 ReadColor(int2 pixel, int2 historySize, uint2 sourceSize) {
     return color / ((end.x - start.x) * (end.y - start.y));
 }
 
-float RotationBlurScale(int2 center, int2 renderSize, float centerDepth, float depthTolerance) {
+float RotationBlurScale(int2 center, int2 renderSize, float centerDepth, float depthTolerance,
+                        float2 centerMotion, bool upscaled) {
     // Opposing cross-axis gradients indicate local rotation. A uniform pan,
     // radial expansion or one-axis shear does not satisfy this test.
     const int radius = 2;
@@ -45,16 +46,77 @@ float RotationBlurScale(int2 center, int2 renderSize, float centerDepth, float d
     const int2 down = center + int2(0, radius);
     const float4 depths = float4(SceneDepth.Load(int3(left, 0)), SceneDepth.Load(int3(right, 0)),
                                  SceneDepth.Load(int3(up, 0)), SceneDepth.Load(int3(down, 0)));
-    if (any(abs(depths - centerDepth) > depthTolerance)) return 1.0;
+    const bool4 sameSurface = abs(depths - centerDepth) <= depthTolerance;
+    if (upscaled) {
+        if (!(sameSurface.x || sameSurface.y) || !(sameSurface.z || sameSurface.w)) return 1.0;
+    } else if (!all(sameSurface)) {
+        return 1.0;
+    }
 
-    const float verticalChange = MotionPixels.Load(int3(right, 0)).y - MotionPixels.Load(int3(left, 0)).y;
-    const float horizontalChange = MotionPixels.Load(int3(down, 0)).x - MotionPixels.Load(int3(up, 0)).x;
+    // Fall back to a one-sided gradient at a spoke or rim boundary.
+    const float leftY = sameSurface.x ? MotionPixels.Load(int3(left, 0)).y : centerMotion.y;
+    const float rightY = sameSurface.y ? MotionPixels.Load(int3(right, 0)).y : centerMotion.y;
+    const float upX = sameSurface.z ? MotionPixels.Load(int3(up, 0)).x : centerMotion.x;
+    const float downX = sameSurface.w ? MotionPixels.Load(int3(down, 0)).x : centerMotion.x;
+    const float verticalChange = rightY - leftY;
+    const float horizontalChange = downX - upX;
     if (verticalChange * horizontalChange >= 0.0) return 1.0;
+
+    if (upscaled) {
+        const float verticalSpan = radius * (float(sameSurface.x) + float(sameSurface.y));
+        const float horizontalSpan = radius * (float(sameSurface.z) + float(sameSurface.w));
+        // A wheel viewed at an angle can have much stronger motion on one axis.
+        const float rotation = sqrt(abs(verticalChange * horizontalChange) / (verticalSpan * horizontalSpan)) * BlurScale;
+        return 1.0 - smoothstep(0.025, 0.09, rotation);
+    }
     const float rotation = min(abs(verticalChange), abs(horizontalChange)) * BlurScale / (2 * radius);
     return lerp(1.0, 0.35, smoothstep(0.025, 0.12, rotation));
 }
 
-float3 BlurScene(float2 uv, uint2 renderSize, float3 centerColor) {
+float SurfaceWeight(int2 pixel, float centerDepth, float2 motion, float depthTolerance, float motionTolerance) {
+    const float tapDepth = SceneDepth.Load(int3(pixel, 0));
+    const float2 tapMotion = MotionPixels.Load(int3(pixel, 0));
+    const float depthWeight = saturate(1.0 - abs(tapDepth - centerDepth) / depthTolerance);
+    const float motionWeight = saturate(1.0 - length(tapMotion - motion) / motionTolerance);
+    return depthWeight * motionWeight;
+}
+
+float SurfaceCoverage(float2 uv, int2 renderSize, float centerDepth, float2 motion,
+                      float depthTolerance, float motionTolerance) {
+    // Evaluate the low-resolution footprint underneath the upscaled color.
+    const float2 position = uv * renderSize - 0.5;
+    const int2 topLeft = int2(floor(position));
+    const float2 fraction = frac(position);
+    const int2 last = renderSize - 1;
+    const float top = lerp(
+        SurfaceWeight(clamp(topLeft, 0, last), centerDepth, motion, depthTolerance, motionTolerance),
+        SurfaceWeight(clamp(topLeft + int2(1, 0), 0, last), centerDepth, motion, depthTolerance, motionTolerance), fraction.x);
+    const float bottom = lerp(
+        SurfaceWeight(clamp(topLeft + int2(0, 1), 0, last), centerDepth, motion, depthTolerance, motionTolerance),
+        SurfaceWeight(clamp(topLeft + int2(1, 1), 0, last), centerDepth, motion, depthTolerance, motionTolerance), fraction.x);
+    return lerp(top, bottom, fraction.y);
+}
+
+float VerticalEdgeBlurScale(int2 center, int2 renderSize, float centerDepth, float2 motion) {
+    // An edge-on tire can have strong vertical motion with little measurable
+    // rotation. Protect the foreground side of a depth break across that motion.
+    const float vertical = smoothstep(1.5, 3.0, abs(motion.y) / max(abs(motion.x), 0.25));
+    if (vertical == 0.0 || centerDepth <= 0.0001) return 1.0;
+
+    const int2 last = renderSize - 1;
+    const float nearLeft = SceneDepth.Load(int3(clamp(center - int2(2, 0), 0, last), 0));
+    const float nearRight = SceneDepth.Load(int3(clamp(center + int2(2, 0), 0, last), 0));
+    const float farLeft = SceneDepth.Load(int3(clamp(center - int2(5, 0), 0, last), 0));
+    const float farRight = SceneDepth.Load(int3(clamp(center + int2(5, 0), 0, last), 0));
+    // Reversed Z assigns smaller values to background surfaces.
+    const float nearDrop = (centerDepth - min(nearLeft, nearRight)) / centerDepth;
+    const float farDrop = (centerDepth - min(farLeft, farRight)) / centerDepth;
+    const float nearEdge = smoothstep(0.12, 0.28, nearDrop);
+    const float farEdge = smoothstep(0.18, 0.35, farDrop);
+    return 1.0 - vertical * max(nearEdge, 0.65 * farEdge);
+}
+
+float3 BlurScene(float2 uv, uint2 renderSize, float3 centerColor, bool upscaled) {
     const uint2 center = min(uint2(uv * renderSize), renderSize - 1);
     const float2 motion = MotionPixels.Load(int3(center, 0));
     float2 direction = motion * BlurScale / float2(renderSize);
@@ -63,13 +125,23 @@ float3 BlurScene(float2 uv, uint2 renderSize, float3 centerColor) {
     direction *= min(1.0, 0.12 / span);
     const float centerDepth = SceneDepth.Load(int3(center, 0));
     const float depthTolerance = max(centerDepth * 0.08, 0.0001);
-    const float rotationScale = RotationBlurScale(int2(center), int2(renderSize), centerDepth, depthTolerance);
-    direction *= rotationScale;
+    const float rotationScale = RotationBlurScale(int2(center), int2(renderSize), centerDepth, depthTolerance, motion, upscaled);
+    const float motionTolerance = max(length(motion) * 0.35, 2.0);
+    float blurWeight = rotationScale;
+    [branch]
+    if (upscaled) {
+        if (blurWeight <= 0.0) return centerColor;
+        const float coverage = SurfaceCoverage(uv, int2(renderSize), centerDepth, motion, depthTolerance, motionTolerance);
+        // Keep more of the reconstructed pixel at spoke and silhouette edges.
+        blurWeight *= smoothstep(0.55, 0.9, coverage);
+        blurWeight *= VerticalEdgeBlurScale(int2(center), int2(renderSize), centerDepth, motion);
+        if (blurWeight <= 0.0) return centerColor;
+    }
+    direction *= blurWeight;
 
     // Sample mostly toward the previous position, with a short tail on the
     // other side. Dither in screen space so the pattern is stable over time.
     const float jitter = frac(dot(floor(uv * float2(HistoryWidth, HistoryHeight)), float2(0.7548777, 0.5698403)));
-    const float motionTolerance = max(length(motion) * 0.35, 2.0);
     float totalWeight = 0.03125;
     float3 color = centerColor * totalWeight;
     [loop]
@@ -77,11 +149,9 @@ float3 BlurScene(float2 uv, uint2 renderSize, float3 centerColor) {
         const float2 tapUV = uv + direction * ((float(tap) - 3.0 + jitter) / 11.0);
         if (any(tapUV < 0.0) || any(tapUV >= 1.0)) continue;
         const uint2 samplePixel = min(uint2(tapUV * renderSize), renderSize - 1);
-        const float tapDepth = SceneDepth.Load(int3(samplePixel, 0));
-        const float2 tapMotion = MotionPixels.Load(int3(samplePixel, 0));
-        const float depthWeight = saturate(1.0 - abs(tapDepth - centerDepth) / depthTolerance);
-        const float motionWeight = saturate(1.0 - length(tapMotion - motion) / motionTolerance);
-        const float weight = depthWeight * motionWeight;
+        const float weight = upscaled ?
+            smoothstep(0.55, 0.9, SurfaceCoverage(tapUV, int2(renderSize), centerDepth, motion, depthTolerance, motionTolerance)) :
+            SurfaceWeight(int2(samplePixel), centerDepth, motion, depthTolerance, motionTolerance);
         if (weight > 0.0) {
             color += DlssOutput.SampleLevel(LinearClamp, tapUV, 0.0).rgb * weight;
             totalWeight += weight;
@@ -89,7 +159,7 @@ float3 BlurScene(float2 uv, uint2 renderSize, float3 centerColor) {
     }
     // Retain more of the resolved scene on strongly rotating surfaces, where
     // a straight sampling line is a poor approximation of the exposure path.
-    return lerp(centerColor, color / totalWeight, rotationScale);
+    return lerp(centerColor, color / totalWeight, blurWeight);
 }
 
 [numthreads(16, 8, 1)]
@@ -132,7 +202,9 @@ void main(uint3 thread : SV_DispatchThreadID) {
     }
     [branch]
     if (BlurScale > 0.0) {
-        color = BlurScene((float2(pixel) + 0.5) / float2(historySize), uint2(RenderWidth, RenderHeight), color);
+        const uint2 renderSize = uint2(RenderWidth, RenderHeight);
+        const bool upscaled = any(sourceSize > renderSize);
+        color = BlurScene((float2(pixel) + 0.5) / float2(historySize), renderSize, color, upscaled);
     }
     HistoryColor[target] = clamp(color, 0.0, 65000.0);
 }

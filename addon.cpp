@@ -196,7 +196,7 @@ void LoadSettings(const std::wstring& directory) {
 
 void DrawSettings(effect_runtime*) {
     constexpr const char* modes[]{"Stock TAA", "DLAA / DLSS (automatic)", "Unfiltered RGB (diagnostic)"};
-    ImGui::TextUnformatted("DIRT 5 DLSS v1.3");
+    ImGui::TextUnformatted("DIRT 5 DLSS v1.6");
     if (ImGui::Combo("Anti-aliasing", &pending_settings.mode, modes, static_cast<int>(std::size(modes)))) {
         reshade::set_config_value(nullptr, kSettingsSection, "Mode", pending_settings.mode);
     }
@@ -1262,9 +1262,9 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshade_m
     Events<true>();
     reshade::register_overlay(kSettingsTab, DrawSettings);
     reshade::log::message(reshade::log::level::info,
-        enable_dlaa ? "[Dirt5DLAA] Initialized v1.3 (automatic DLAA / DLSS)." :
-        pass_through ? "[Dirt5DLAA] Initialized v1.3 (experimental color pass-through)." :
-                       "[Dirt5DLAA] Initialized v1.3 (stock TAA).");
+        enable_dlaa ? "[Dirt5DLAA] Initialized v1.6 (automatic DLAA / DLSS)." :
+        pass_through ? "[Dirt5DLAA] Initialized v1.6 (experimental color pass-through)." :
+                       "[Dirt5DLAA] Initialized v1.6 (stock TAA).");
     if (enable_dlaa) {
         char line[96];
         std::snprintf(line, sizeof(line), "[Dirt5DLAA] Sharpening=%d (0-100).", sharpening.load(std::memory_order_relaxed));
