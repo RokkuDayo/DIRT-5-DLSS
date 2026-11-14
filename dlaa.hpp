@@ -325,7 +325,7 @@ private:
         NVSDK_NGX_FeatureCommonInfo info{};
         info.PathListInfo = {&search_path, 1};
         auto result = NVSDK_NGX_D3D12_Init_with_ProjectID("6ebfc817-214f-42ac-89b5-080a633d88e0",
-            NVSDK_NGX_ENGINE_TYPE_CUSTOM, "0.5", addon_directory.c_str(), device_.Get(), &info);
+            NVSDK_NGX_ENGINE_TYPE_CUSTOM, "1.0", addon_directory.c_str(), device_.Get(), &info);
         if (NVSDK_NGX_FAILED(result)) {
             LogResult("NGX initialization failed", result);
             return false;
