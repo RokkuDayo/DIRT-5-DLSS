@@ -1,4 +1,4 @@
-# DIRT 5 DLSS v1.3
+# DIRT 5 DLSS
 
 A ReShade add-on for replacing the game's TAA with NVIDIA DLSS/DLAA, based on RenoDX.
 
