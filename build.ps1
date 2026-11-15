@@ -22,8 +22,8 @@ if (!(Test-Path -LiteralPath $ngxLib)) {
 }
 if (!$ngxLib) { throw 'The NVIDIA NGX static x64 library is required.' }
 
-foreach ($shader in @(@('prepare', 'kPrepareCS'), @('pack', 'kPackCS'))) {
-    & $Dxc -T cs_6_0 -E main -WX -Fh "$objectDir\$($shader[0]).inc" -Vn $shader[1] (Join-Path $PSScriptRoot "$($shader[0]).hlsl")
+foreach ($shader in @(@('prepare', 'kPrepareCS', 'cs_6_0'), @('pack', 'kPackCS', 'cs_6_0'), @('motion-id', 'kMotionIdPS', 'ps_6_0'))) {
+    & $Dxc -T $shader[2] -E main -WX -Fh "$objectDir\$($shader[0]).inc" -Vn $shader[1] (Join-Path $PSScriptRoot "$($shader[0]).hlsl")
     if ($LASTEXITCODE -ne 0) { throw "DXC failed for $($shader[0]).hlsl." }
 }
 

@@ -5,6 +5,7 @@
 #include <utils/hash.hpp>
 #include <MinHook.h>
 #include "dlaa.hpp"
+#include "motion-id.inc"
 
 #include <algorithm>
 #include <array>
@@ -28,6 +29,7 @@ using namespace reshade::api;
 using Event = reshade::addon_event;
 constexpr uint32_t kTaaHash = 0xF35783D3;
 constexpr uint32_t kCompositeHash = 0x41177900;
+constexpr uint32_t kMotionPixelHash = 0x9FA3C08F;
 constexpr uint32_t kMaxRootParameters = 64;
 constexpr uint64_t kBatchBytes = 144;
 constexpr uint64_t kViewBytes = 3248;
@@ -38,13 +40,14 @@ struct Binding {
 };
 enum Input {
     kBatch, kView, kDepth, kColor, kMotion, kHistory0, kHistory1,
-    kComposite0, kComposite1, kBindingCount,
+    kComposite0, kComposite1, kInstances, kBindingCount,
 };
 constexpr uint32_t kTaaMask = (1u << kComposite0) - 1;
 struct Layout {
     std::array<Binding, kBindingCount> bindings{};
     uint32_t parameter_count = 0;
     uint32_t found = 0;
+    bool motion_draw_constants = false;
 };
 
 struct Slot {
@@ -85,6 +88,7 @@ struct ReadyFrame {
     uint64_t submission_serial = 0;
     dirt5::Rect render, history;
     int preset = 0;
+    bool instances_readable = false;
 };
 struct QueueTrace {
     std::unordered_map<uint64_t, std::unordered_map<uint64_t, UploadSnapshot>> uploads;
@@ -196,7 +200,7 @@ void LoadSettings(const std::wstring& directory) {
 
 void DrawSettings(effect_runtime*) {
     constexpr const char* modes[]{"Stock TAA", "DLAA / DLSS (automatic)", "Unfiltered RGB (diagnostic)"};
-    ImGui::TextUnformatted("DIRT 5 DLSS v1.6");
+    ImGui::TextUnformatted("DIRT 5 DLSS v1.12");
     if (ImGui::Combo("Anti-aliasing", &pending_settings.mode, modes, static_cast<int>(std::size(modes)))) {
         reshade::set_config_value(nullptr, kSettingsSection, "Mode", pending_settings.mode);
     }
@@ -218,13 +222,13 @@ void DrawSettings(effect_runtime*) {
     }
     ImGui::SetItemTooltip("Applies immediately to DLAA and DLSS. 0%% disables sharpening.");
 
-    constexpr const char* exposures[]{"Off", "DriveClub 30 FPS exposure", "Short 60 FPS exposure"};
+    constexpr const char* exposures[]{"Off", "DriveClub (1/150 s)", "Short (1/300 s)"};
     int blur = motion_blur.load(std::memory_order_relaxed);
     if (ImGui::Combo("Gameplay motion blur", &blur, exposures, static_cast<int>(std::size(exposures)))) {
         motion_blur.store(blur, std::memory_order_relaxed);
         reshade::set_config_value(nullptr, kSettingsSection, "MotionBlur", blur);
     }
-    ImGui::SetItemTooltip("Experimental depth-aware blur. Applies live in automatic DLAA / DLSS mode.");
+    ImGui::SetItemTooltip("Motion blur with per-draw surface IDs. Applies live in automatic DLAA / DLSS mode.");
 
     static int motion_range = 16;
     bool show_motion = motion_view_range.load(std::memory_order_relaxed) != 0;
@@ -446,13 +450,11 @@ const char* ValidateJitter(const UploadSnapshot* batch, const UploadSnapshot* vi
         ? "verified" : "projection-mismatch";
 }
 
-bool DepthPreservedAfterTaa(const ListData& list, resource depth, size_t first) {
+bool PreservedAfterTaa(const ListData& list, resource input, size_t first) {
     if (list.incomplete_transitions || first > list.native_transitions.size()) return false;
-    // The stock compute shader just sampled this depth-stencil texture. Its
-    // shader-readable state and contents are usable if the rest of the list leaves it alone.
     for (size_t i = first; i < list.native_transitions.size(); ++i) {
         const auto& transition = list.native_transitions[i];
-        if (!transition.image.handle || transition.image == depth) return false;
+        if (!transition.image.handle || transition.image == input) return false;
     }
     return true;
 }
@@ -511,7 +513,11 @@ void TraceSubmission(command_queue* queue, command_list* cmd) {
                         submission.ready.render = batch->batch.render;
                         submission.ready.history = batch->batch.history;
                         const resource depth{reinterpret_cast<uintptr_t>(taa.frame->depth.Get())};
-                        submission.ready.depth_readable = DepthPreservedAfterTaa(*list, depth, taa.transition_count);
+                        submission.ready.depth_readable = PreservedAfterTaa(*list, depth, taa.transition_count);
+                        if (taa.frame->instances) {
+                            const resource instances{reinterpret_cast<uintptr_t>(taa.frame->instances.Get())};
+                            submission.ready.instances_readable = PreservedAfterTaa(*list, instances, taa.transition_count);
+                        }
                     }
                     break;
                 }
@@ -639,14 +645,15 @@ void STDMETHODCALLTYPE ExecuteHook(ID3D12CommandQueue* queue, UINT count, ID3D12
             const int exposure = motion_blur.load(std::memory_order_relaxed);
             float blur_scale = 0.0f;
             if (!reset && exposure && frame_seconds > 0.0f && frame_seconds <= 0.1f) {
-                const float reference_fps = exposure == 1 ? 30.0f : 60.0f;
-                blur_scale = 0.2f / (reference_fps * std::max(frame_seconds, 1.0f / 240.0f));
+                const float shutter_seconds = exposure == 1 ? 1.0f / 150.0f : 1.0f / 300.0f;
+                blur_scale = std::min(1.0f, shutter_seconds / frame_seconds);
             }
             if (trace.renderer->Run(queue, original_execute, ready.frame, ready.render, ready.history,
                                     ready.jitter_x, ready.jitter_y, reset,
                                     static_cast<UINT>(sharpening.load(std::memory_order_relaxed)),
                                     dirt5::kPresets[ready.preset],
-                                    motion_view_range.load(std::memory_order_relaxed), blur_scale)) {
+                                    motion_view_range.load(std::memory_order_relaxed), blur_scale,
+                                    ready.instances_readable && serial == ready.submission_serial + 1)) {
                 trace.last_evaluation = now;
                 ++trace.evaluated;
                 if (reset) ++trace.resets;
@@ -733,7 +740,8 @@ bool UpdateDescriptors(device* dev, uint32_t count, const descriptor_table_updat
             slot.type = update.type;
             if (update.type == descriptor_type::constant_buffer) {
                 slot.cbv = static_cast<const buffer_range*>(update.descriptors)[n];
-            } else if (update.type == descriptor_type::texture_shader_resource_view ||
+            } else if (update.type == descriptor_type::buffer_shader_resource_view ||
+                       update.type == descriptor_type::texture_shader_resource_view ||
                        update.type == descriptor_type::texture_unordered_access_view) {
                 const auto view = static_cast<const resource_view*>(update.descriptors)[n];
                 if (!view.handle) continue;
@@ -776,6 +784,11 @@ Layout ResolveLayout(uint32_t count, const pipeline_layout_param* params) {
     Layout result;
     result.parameter_count = count;
     if (!params) return result;
+    if (count && params[0].type == pipeline_layout_param_type::push_constants) {
+        const auto& constants = params[0].push_constants;
+        result.motion_draw_constants = constants.dx_register_index == 0 && constants.dx_register_space == 0 &&
+            constants.count == 2 && (constants.visibility & shader_stage::pixel) != 0;
+    }
     struct Register {
         descriptor_type type;
         uint32_t index;
@@ -791,11 +804,12 @@ Layout ResolveLayout(uint32_t count, const pipeline_layout_param* params) {
         {descriptor_type::unordered_access_view, 1, 26},
         {descriptor_type::shader_resource_view, 4, 79},
         {descriptor_type::shader_resource_view, 5, 79},
+        {descriptor_type::shader_resource_view, 31, 512},
     }};
     auto match = [&](uint32_t param, const descriptor_range& range, bool root_cbv) {
         for (uint32_t i = 0; i < registers.size(); ++i) {
             const auto& expected = registers[i];
-            const auto stage = i >= kComposite0 ? shader_stage::pixel : shader_stage::compute;
+            const auto stage = i == kComposite0 || i == kComposite1 ? shader_stage::pixel : shader_stage::compute;
             if ((range.visibility & stage) == 0 || (i == kBatch) != root_cbv || range.type != expected.type ||
                 range.dx_register_space != expected.space || expected.index < range.dx_register_index) continue;
             const uint32_t delta = expected.index - range.dx_register_index;
@@ -843,6 +857,34 @@ void DestroyLayout(device* dev, pipeline_layout layout) {
         const std::scoped_lock lock(data->mutex);
         data->layouts.erase(layout.handle);
     }
+}
+
+bool CreatePipeline(device* dev, pipeline_layout layout, uint32_t count, const pipeline_subobject* objects) {
+    shader_desc* pixel = nullptr;
+    bool motion_target = false;
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto& object = objects[i];
+        if (object.count != 1 || !object.data) continue;
+        if (object.type == pipeline_subobject_type::pixel_shader) {
+            pixel = static_cast<shader_desc*>(object.data);
+        } else if (object.type == pipeline_subobject_type::render_target_formats) {
+            motion_target = *static_cast<const format*>(object.data) == format::r16g16b16a16_float;
+        }
+    }
+    if (!motion_target || !pixel || !pixel->code || pixel->code_size != 5067 ||
+        renodx::utils::hash::ComputeCRC32(static_cast<const uint8_t*>(pixel->code), pixel->code_size) != kMotionPixelHash) return false;
+    auto* data = Data<DeviceData>(dev);
+    if (!data) return false;
+    const std::scoped_lock lock(data->mutex);
+    const auto root = data->layouts.find(layout.handle);
+    if (root == data->layouts.end() || !root->second.motion_draw_constants) return false;
+    pixel->code = kMotionIdPS;
+    pixel->code_size = sizeof(kMotionIdPS);
+    static std::once_flag reported;
+    std::call_once(reported, [] {
+        reshade::log::message(reshade::log::level::info, "[Dirt5DLAA] Enabled motion surface IDs in MotionVectors_PS.");
+    });
+    return true;
 }
 
 void InitPipeline(device* dev, pipeline_layout, uint32_t count,
@@ -993,7 +1035,7 @@ bool IsTexture(ID3D12Resource* image, DXGI_FORMAT format) {
 std::shared_ptr<dirt5::Frame> StageFrame(DeviceData& data, const ListData& list,
                                        ID3D12GraphicsCommandList* native, const Slot& color,
                                        const Slot& depth, const Slot& motion, const Slot& history,
-                                       buffer_range batch, buffer_range view) {
+                                       buffer_range batch, buffer_range view, const Slot& instances = {}) {
     auto has_input_transition = [&](resource image, resource_usage before, D3D12_RESOURCE_BARRIER_FLAGS flags) {
         for (uint32_t i = 0; i < list.barrier_count; ++i) {
             const auto& transition = list.barriers[i];
@@ -1051,6 +1093,18 @@ std::shared_ptr<dirt5::Frame> StageFrame(DeviceData& data, const ListData& list,
     frame->view = Native<ID3D12Resource>(view.buffer);
     frame->batch_offset = batch.offset;
     frame->view_offset = view.offset;
+    if (instances.type == descriptor_type::buffer_shader_resource_view &&
+        instances.view.type == resource_view_type::buffer && instances.view.format == format::unknown &&
+        instances.view.buffer.offset == 0 && instances.view.buffer.structured.stride == dirt5::kInstanceStride &&
+        instances.view.buffer.structured.count == 98304 && instances.image.handle) {
+        auto* buffer = Native<ID3D12Resource>(instances.image);
+        const auto desc = buffer->GetDesc();
+        if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER &&
+            desc.Width == UINT64{98304} * dirt5::kInstanceStride) {
+            frame->instances = buffer;
+            frame->instance_count = 98304;
+        }
+    }
     dirt5::CopyInput(native, Native<ID3D12Resource>(color.image), frame->staging->color.Get());
     dirt5::CopyInput(native, Native<ID3D12Resource>(motion.image), frame->staging->motion.Get());
     return frame;
@@ -1168,7 +1222,8 @@ bool Dispatch(command_list* cmd, uint32_t x, uint32_t y, uint32_t z) {
     bool staged = false;
     if ((trace_jitter || enable_dlaa) && compatible && batch_binding.buffer.handle && view.cbv.buffer.handle) {
         auto frame = enable_dlaa && native_queue_hook_ready.load() && native_barrier_hook_ready.load() ?
-            StageFrame(*data, *list, native, source, depth, motion, target, batch_binding, view.cbv) : nullptr;
+            StageFrame(*data, *list, native, source, depth, motion, target, batch_binding, view.cbv,
+                       resolve(kInstances)) : nullptr;
         staged = bool(frame);
         list->trace_commands.emplace_back(TaaConstants{batch_binding, view.cbv, static_cast<uint32_t>(phase),
             std::move(frame), list->native_transitions.size(), x, y});
@@ -1222,6 +1277,7 @@ template <bool Register> void Events() {
     DIRT5_EVENT(barrier, Barriers);
     DIRT5_EVENT(dispatch, Dispatch);
     if (enable_dlaa) {
+        DIRT5_EVENT(create_pipeline, CreatePipeline);
         DIRT5_EVENT(init_command_queue, InitDlaaQueue);
         DIRT5_EVENT(draw, FindComposite);
     }
@@ -1262,9 +1318,9 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon, HMODULE reshade_m
     Events<true>();
     reshade::register_overlay(kSettingsTab, DrawSettings);
     reshade::log::message(reshade::log::level::info,
-        enable_dlaa ? "[Dirt5DLAA] Initialized v1.6 (automatic DLAA / DLSS)." :
-        pass_through ? "[Dirt5DLAA] Initialized v1.6 (experimental color pass-through)." :
-                       "[Dirt5DLAA] Initialized v1.6 (stock TAA).");
+        enable_dlaa ? "[Dirt5DLAA] Initialized v1.12 (automatic DLAA / DLSS)." :
+        pass_through ? "[Dirt5DLAA] Initialized v1.12 (experimental color pass-through)." :
+                       "[Dirt5DLAA] Initialized v1.12 (stock TAA).");
     if (enable_dlaa) {
         char line[96];
         std::snprintf(line, sizeof(line), "[Dirt5DLAA] Sharpening=%d (0-100).", sharpening.load(std::memory_order_relaxed));

@@ -72,10 +72,13 @@ struct Staging {
     ComPtr<ID3D12Resource> color, motion;
     Extent color_size, motion_size;
 };
+inline constexpr UINT kInstanceStride = 136;
 struct Frame {
     std::shared_ptr<Staging> staging;
     ComPtr<ID3D12Resource> depth, history, batch, view;
     UINT64 batch_offset = 0, view_offset = 0;
+    ComPtr<ID3D12Resource> instances;
+    UINT instance_count = 0;
 };
 
 inline constexpr std::array kPresets{
@@ -150,7 +153,8 @@ public:
 
     bool Run(ID3D12CommandQueue* queue, ExecuteLists execute, const std::shared_ptr<Frame>& frame,
              Rect render, Rect history, float jitter_x, float jitter_y, bool reset, UINT sharpening,
-             NVSDK_NGX_DLSS_Hint_Render_Preset preset, UINT motion_view_range = 0, float blur_scale = 0.0f) {
+             NVSDK_NGX_DLSS_Hint_Render_Preset preset, UINT motion_view_range = 0, float blur_scale = 0.0f,
+             bool instances_readable = false) {
         if (disabled_ || !fence_) return false;
         Prune();
         if (!ngx_initialized_ && !Initialize()) {
@@ -183,7 +187,7 @@ public:
             disabled_ = true;
             return false;
         }
-        PopulateDescriptors(slot, *frame);
+        PopulateDescriptors(slot, *frame, instances_readable && blur_scale > 0.0f && !motion_view_range);
         auto* list = slot.list.Get();
         auto* staged_color = frame->staging->color.Get();
         auto* staged_motion = frame->staging->motion.Get();
@@ -206,12 +210,11 @@ public:
 
         D3D12_RESOURCE_BARRIER prepare_done[]{
             Transition(staged_color, read, D3D12_RESOURCE_STATE_COPY_DEST),
-            Transition(staged_motion, read, D3D12_RESOURCE_STATE_COPY_DEST),
             Transition(slot.motion.Get(), write, read),
             Transition(slot.depth.Get(), write, read),
             Transition(slot.color.Get(), write, read),
         };
-        list->ResourceBarrier(5, prepare_done);
+        list->ResourceBarrier(static_cast<UINT>(std::size(prepare_done)), prepare_done);
 
         NVSDK_NGX_D3D12_DLSS_Eval_Params eval{};
         eval.Feature.pInColor = slot.color.Get();
@@ -245,17 +248,20 @@ public:
         list->SetComputeRootDescriptorTable(0, Gpu(slot, 6));
         const UINT pack_settings[]{sharpening, history.x, history.y, history.size.width, history.size.height,
                                    motion_view_range, render.size.width, render.size.height,
-                                   std::bit_cast<UINT>(reset ? 0.0f : blur_scale)};
+                                   std::bit_cast<UINT>(reset ? 0.0f : blur_scale), render.x, render.y};
         list->SetComputeRoot32BitConstants(1, static_cast<UINT>(std::size(pack_settings)), pack_settings, 0);
+        list->SetComputeRootConstantBufferView(2, frame->batch->GetGPUVirtualAddress() + frame->batch_offset);
+        list->SetComputeRootConstantBufferView(3, frame->view->GetGPUVirtualAddress() + frame->view_offset);
         Dispatch(list, history.size);
         D3D12_RESOURCE_BARRIER done[]{
+            Transition(staged_motion, read, D3D12_RESOURCE_STATE_COPY_DEST),
             Transition(slot.output.Get(), read, write),
             Transition(frame->history.Get(), write, read),
             Transition(slot.motion.Get(), read, write),
             Transition(slot.depth.Get(), read, write),
             Transition(slot.color.Get(), read, write),
         };
-        list->ResourceBarrier(5, done);
+        list->ResourceBarrier(static_cast<UINT>(std::size(done)), done);
         if (FAILED(list->Close())) {
             disabled_ = true;
             return false;
@@ -292,7 +298,7 @@ private:
 
     bool Pipeline(bool prepare, const void* code, size_t size, ID3D12RootSignature** signature,
                   ID3D12PipelineState** pipeline) {
-        constexpr UINT srvs = 3;
+        const UINT srvs = prepare ? 3u : 5u;
         const D3D12_DESCRIPTOR_RANGE ranges[]{
             {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, srvs, 0, 0, 0},
             {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, prepare ? 3u : 1u, 0, 0, srvs},
@@ -307,7 +313,10 @@ private:
             root[3].Constants = {2, 0, 4};
         } else {
             root[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-            root[1].Constants.Num32BitValues = 9;
+            root[1].Constants = {2, 0, 11};
+            root[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            root[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            root[3].Descriptor.ShaderRegister = 1;
         }
         root[table].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         root[table].DescriptorTable = {2, ranges};
@@ -317,7 +326,7 @@ private:
         sampler.MaxAnisotropy = 1;
         sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
         sampler.MaxLOD = D3D12_FLOAT32_MAX;
-        const D3D12_ROOT_SIGNATURE_DESC desc{prepare ? 4u : 2u, root, prepare ? 0u : 1u,
+        const D3D12_ROOT_SIGNATURE_DESC desc{4, root, prepare ? 0u : 1u,
                                              prepare ? nullptr : &sampler, D3D12_ROOT_SIGNATURE_FLAG_NONE};
         ComPtr<ID3DBlob> blob;
         if (FAILED(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, nullptr)) ||
@@ -356,7 +365,7 @@ private:
             return false;
         }
         increment_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        const D3D12_DESCRIPTOR_HEAP_DESC heap{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 10,
+        const D3D12_DESCRIPTOR_HEAP_DESC heap{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 12,
                                             D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
         for (auto& slot : slots_) {
             if (FAILED(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.allocator))) ||
@@ -467,7 +476,7 @@ private:
     D3D12_GPU_DESCRIPTOR_HANDLE Gpu(const EvalSlot& slot, UINT index) const {
         return {slot.descriptors->GetGPUDescriptorHandleForHeapStart().ptr + UINT64(index) * increment_};
     }
-    void PopulateDescriptors(const EvalSlot& slot, const Frame& frame) {
+    void PopulateDescriptors(const EvalSlot& slot, const Frame& frame, bool use_instances) {
         auto srv = [&](UINT index, ID3D12Resource* image, DXGI_FORMAT format) {
             D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
             desc.Format = format;
@@ -491,7 +500,14 @@ private:
         srv(6, slot.output.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
         srv(7, slot.motion.Get(), DXGI_FORMAT_R16G16_FLOAT);
         srv(8, slot.depth.Get(), DXGI_FORMAT_R32_FLOAT);
-        uav(9, frame.history.Get(), DXGI_FORMAT_R11G11B10_FLOAT);
+        srv(9, frame.staging->motion.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        D3D12_SHADER_RESOURCE_VIEW_DESC instances{};
+        instances.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        instances.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        instances.Buffer.NumElements = use_instances ? frame.instance_count : 1;
+        instances.Buffer.StructureByteStride = kInstanceStride;
+        device_->CreateShaderResourceView(use_instances ? frame.instances.Get() : nullptr, &instances, Cpu(slot, 10));
+        uav(11, frame.history.Get(), DXGI_FORMAT_R11G11B10_FLOAT);
     }
 };
 }  // namespace dirt5
