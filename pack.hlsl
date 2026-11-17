@@ -45,29 +45,45 @@ float3 ReadColor(int2 pixel, int2 historySize, uint2 sourceSize) {
     return color / ((end.x - start.x) * (end.y - start.y));
 }
 
-float MotionId(int2 pixel) {
-    return TaggedMotion.Load(int3(pixel + int2(RenderOrigin), 0)).w;
+// The motion texture holds world displacement before camera reprojection.
+static const float SceneryMotionSquared = 0.06 * 0.06;
+
+float SceneryFootprint(float2 uv, float4 weights) {
+    const float4 x = TaggedMotion.GatherRed(LinearClamp, uv);
+    const float4 y = TaggedMotion.GatherGreen(LinearClamp, uv);
+    const float4 z = TaggedMotion.GatherBlue(LinearClamp, uv);
+    return dot(float4(!(x * x + y * y + z * z <= SceneryMotionSquared)), weights);
 }
 
-float SampleWeight(float2 uv, int2 renderSize, float id, float centerDepth, bool upscaled) {
+float SampleWeight(float2 uv, int2 renderSize, float id, float centerDepth, bool upscaled, bool scenery) {
     const int2 pixel = min(int2(uv * renderSize), renderSize - 1);
     if (upscaled) {
-        // The scene color is already reconstructed. Drop taps whose bilinear
-        // footprint can include another surface at render resolution.
+        // Check the render-resolution footprint beneath the reconstructed color.
         uint width, height;
         TaggedMotion.GetDimensions(width, height);
         const float2 position = clamp(uv * renderSize, 0.5, float2(renderSize) - 0.5);
-        const float4 ids = TaggedMotion.GatherAlpha(LinearClamp, (position + RenderOrigin) / float2(width, height));
+        const float2 motionUV = (position + RenderOrigin) / float2(width, height);
         const float2 fraction = frac(position - 0.5);
         const float4 weights = float4((1.0 - fraction.x) * fraction.y, fraction.x * fraction.y,
                                      fraction.x * (1.0 - fraction.y), (1.0 - fraction.x) * (1.0 - fraction.y));
-        if (dot(float4(ids != id), weights) > 0.0001) return 0.0;
-    } else if (MotionId(pixel) != id) {
-        return 0.0;
+        [branch]
+        if (scenery) {
+            if (SceneryFootprint(motionUV, weights) > 0.0001) return 0.0;
+        } else {
+            const float4 ids = TaggedMotion.GatherAlpha(LinearClamp, motionUV);
+            if (dot(float4(ids != id), weights) > 0.0001) return 0.0;
+        }
+    } else {
+        const float4 candidate = TaggedMotion.Load(int3(pixel + int2(RenderOrigin), 0));
+        if (scenery ? !(dot(candidate.xyz, candidate.xyz) <= SceneryMotionSquared) : candidate.w != id) return 0.0;
     }
 
-    // Reversed-Z depth is approximately inverse view distance.
     const float depth = SceneDepth.Load(int3(pixel, 0));
+    if (scenery) {
+        // Nearby scenery can share a streak through foliage and prop edges.
+        // Fade across larger depth changes to keep distant sky and foreground apart.
+        return 1.0 - smoothstep(0.04, 0.50, abs(depth - centerDepth) / max(max(depth, centerDepth), 0.0001));
+    }
     return saturate(1.0 - abs(depth - centerDepth) / max(0.0001, centerDepth * 0.12));
 }
 
@@ -141,6 +157,7 @@ float3 BlurScene(float2 uv, int2 renderSize, float3 centerColor, bool upscaled) 
     const float id = motion.w;
     const WheelSpin spin = FindWheelSpin(id, CameraOrigin.xyz + ViewOffset(renderUV, inverseZ), motion.xyz);
     const bool wheel = spin.angle != 0.0;
+    const bool scenery = !wheel && dot(motion.xyz, motion.xyz) <= SceneryMotionSquared;
     const float exposureAngle = BlurScale * spin.angle;
     float2 direction;
     [branch]
@@ -162,9 +179,9 @@ float3 BlurScene(float2 uv, int2 renderSize, float3 centerColor, bool upscaled) 
     const float span = length(direction * referenceSize);
     if (!isfinite(span) || span < 1.0) return centerColor;
 
-    if (upscaled && SampleWeight(uv, renderSize, id, centerDepth, true) == 0.0) return centerColor;
+    if (upscaled && SampleWeight(uv, renderSize, id, centerDepth, true, scenery) == 0.0) return centerColor;
     // Keep taps close enough to avoid skipping over spokes or thin scenery.
-    const float rolloff = abs(id) >= 2.0 ? 5.0 : 14.0;
+    const float rolloff = !scenery && abs(id) >= 2.0 ? 5.0 : 14.0;
     const float extra = max(0.0, span - rolloff);
     const float limitedSpan = min(span, rolloff) + rolloff * extra / (rolloff + extra);
     const float spanScale = limitedSpan / span;
@@ -183,7 +200,7 @@ float3 BlurScene(float2 uv, int2 renderSize, float3 centerColor, bool upscaled) 
             if (!all(isfinite(tapUV))) continue;
         }
         if (any(tapUV < 0.0) || any(tapUV >= 1.0)) continue;
-        const float weight = SampleWeight(tapUV, renderSize, id, centerDepth, upscaled);
+        const float weight = SampleWeight(tapUV, renderSize, id, centerDepth, upscaled, scenery);
         if (weight > 0.0) {
             const float3 sampleColor = upscaled ? DlssOutput.SampleLevel(LinearClamp, tapUV, 0.0).rgb :
                 DlssOutput.Load(int3(min(int2(tapUV * renderSize), renderSize - 1), 0)).rgb;
