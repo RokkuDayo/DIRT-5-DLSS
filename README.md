@@ -32,7 +32,7 @@ Check `ReShade.log` beside the game executable. The `NGX DLAA initialized` or `N
 
 ## Gameplay motion blur
 
-In the **DIRT 5 DLSS** tab, choose **DriveClub 30 FPS exposure** or **Short 60 FPS exposure** under **Gameplay motion blur**. The setting applies live in automatic DLAA / DLSS mode and defaults to **Off**. The motion-vector debug view takes priority when enabled.
+In the **DIRT 5 DLSS** tab, choose **"DriveClub (1/150 s)** or **Short (1/300 s)** under **Gameplay motion blur**. The setting applies live in automatic DLAA / DLSS mode and defaults to **Off**. The motion-vector debug view takes priority when enabled.
 
 This implementation is based on the one found in the [Driveclub Recomp](https://github.com/OverkillLabs3/driveclub-recomp/pull/216/files).
 
