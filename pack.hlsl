@@ -47,6 +47,7 @@ float3 ReadColor(int2 pixel, int2 historySize, uint2 sourceSize) {
 
 // The motion texture holds world displacement before camera reprojection.
 static const float SceneryMotionSquared = 0.06 * 0.06;
+static const float MovingSilhouette = -1.0;
 
 float SceneryFootprint(float2 uv, float4 weights) {
     const float4 x = TaggedMotion.GatherRed(LinearClamp, uv);
@@ -68,14 +69,15 @@ float SampleWeight(float2 uv, int2 renderSize, float id, float centerDepth, bool
                                      fraction.x * (1.0 - fraction.y), (1.0 - fraction.x) * (1.0 - fraction.y));
         [branch]
         if (scenery) {
-            if (SceneryFootprint(motionUV, weights) > 0.0001) return 0.0;
+            if (SceneryFootprint(motionUV, weights) > 0.0001) return MovingSilhouette;
         } else {
             const float4 ids = TaggedMotion.GatherAlpha(LinearClamp, motionUV);
             if (dot(float4(ids != id), weights) > 0.0001) return 0.0;
         }
     } else {
         const float4 candidate = TaggedMotion.Load(int3(pixel + int2(RenderOrigin), 0));
-        if (scenery ? !(dot(candidate.xyz, candidate.xyz) <= SceneryMotionSquared) : candidate.w != id) return 0.0;
+        if (scenery && !(dot(candidate.xyz, candidate.xyz) <= SceneryMotionSquared)) return MovingSilhouette;
+        if (!scenery && candidate.w != id) return 0.0;
     }
 
     const float depth = SceneDepth.Load(int3(pixel, 0));
@@ -179,7 +181,7 @@ float3 BlurScene(float2 uv, int2 renderSize, float3 centerColor, bool upscaled) 
     const float span = length(direction * referenceSize);
     if (!isfinite(span) || span < 1.0) return centerColor;
 
-    if (upscaled && SampleWeight(uv, renderSize, id, centerDepth, true, scenery) == 0.0) return centerColor;
+    if (upscaled && !scenery && SampleWeight(uv, renderSize, id, centerDepth, true, false) == 0.0) return centerColor;
     // Keep taps close enough to avoid skipping over spokes or thin scenery.
     const float rolloff = !scenery && abs(id) >= 2.0 ? 5.0 : 14.0;
     const float extra = max(0.0, span - rolloff);
@@ -190,6 +192,7 @@ float3 BlurScene(float2 uv, int2 renderSize, float3 centerColor, bool upscaled) 
     const int taps = limitedSpan > 14.0 ? 9 : 5;
     const float stepSize = 1.0 / (taps - 1);
     float3 difference = 0.0;
+    int silhouetteRejects = 0;
     [loop]
     for (int tap = 0; tap < taps; ++tap) {
         const float offset = float(tap) * stepSize - (0.75 + jitter) * 0.25;
@@ -201,14 +204,17 @@ float3 BlurScene(float2 uv, int2 renderSize, float3 centerColor, bool upscaled) 
         }
         if (any(tapUV < 0.0) || any(tapUV >= 1.0)) continue;
         const float weight = SampleWeight(tapUV, renderSize, id, centerDepth, upscaled, scenery);
+        silhouetteRejects += weight == MovingSilhouette;
         if (weight > 0.0) {
             const float3 sampleColor = upscaled ? DlssOutput.SampleLevel(LinearClamp, tapUV, 0.0).rgb :
                 DlssOutput.Load(int3(min(int2(tapUV * renderSize), renderSize - 1), 0)).rgb;
             difference += (sampleColor - centerColor) * weight;
         }
     }
-    // Rejected taps retain the center color and cannot amplify the surviving taps.
-    return centerColor + difference / taps;
+    // Keep the road blurred up to moving silhouettes. Depth and viewport
+    // rejections still retain the center color, with a floor for sparse taps.
+    const float normalization = silhouetteRejects > 0 ? max(2.0, taps - silhouetteRejects + 1.0 / 32.0) : taps;
+    return centerColor + difference / normalization;
 }
 
 [numthreads(16, 8, 1)]
